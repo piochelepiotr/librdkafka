@@ -381,6 +381,130 @@ static void do_test_ListConsumerGroupOffsets_errors(rd_kafka_type_t type,
         SUB_TEST_PASS();
 }
 
+/**
+ * @brief Run \p request and return its error, or the group's error
+ *        when the request itself succeeded.
+ */
+static rd_kafka_resp_err_t
+list_consumer_group_offsets_err(rd_kafka_t *rk,
+                                rd_kafka_ListConsumerGroupOffsets_t *request,
+                                rd_kafka_AdminOptions_t *options,
+                                rd_kafka_queue_t *q,
+                                int tmout_ms) {
+        rd_kafka_event_t *event;
+        const rd_kafka_ListConsumerGroupOffsets_result_t *result;
+        const rd_kafka_group_result_t **groups;
+        size_t group_cnt;
+        rd_kafka_resp_err_t err;
+
+        rd_kafka_ListConsumerGroupOffsets(rk, &request, 1, options, q);
+        event = test_wait_admin_result(
+            q, RD_KAFKA_EVENT_LISTCONSUMERGROUPOFFSETS_RESULT, tmout_ms);
+        result = rd_kafka_event_ListConsumerGroupOffsets_result(event);
+        TEST_ASSERT(result, "Expected ListConsumerGroupOffsets result, got %s",
+                    rd_kafka_event_name(event));
+
+        err = rd_kafka_event_error(event);
+        if (!err) {
+                groups = rd_kafka_ListConsumerGroupOffsets_result_groups(
+                    result, &group_cnt);
+                TEST_ASSERT(groups && group_cnt == 1,
+                            "Expected one group, got %" PRIusz, group_cnt);
+                if (rd_kafka_group_result_error(groups[0]))
+                        err = rd_kafka_error_code(
+                            rd_kafka_group_result_error(groups[0]));
+        }
+        rd_kafka_event_destroy(event);
+        return err;
+}
+
+/**
+ * @brief A FindCoordinator response that arrives after the
+ *        ListConsumerGroupOffsets request timed out must not abort the
+ *        process on the request's freed eonce. See #4605, #3663.
+ */
+static void do_test_ListConsumerGroupOffsets_late_FindCoordinator(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+        rd_kafka_mock_cluster_t *mcluster;
+        const char *bootstraps;
+        const char *topic        = "admin-late-coordinator";
+        const char *group_id     = "admin-late-coordinator-group";
+        const char *warmup_id    = "admin-late-coordinator-warmup";
+        const int req_timeout_ms = 1000;
+        const int coord_rtt_ms   = 3000;
+        rd_kafka_queue_t *q;
+        rd_kafka_AdminOptions_t *options;
+        rd_kafka_ListConsumerGroupOffsets_t *request, *warmup;
+        rd_kafka_topic_partition_list_t *to_list;
+        rd_kafka_resp_err_t err;
+        char errstr[512];
+
+        SUB_TEST_QUICK();
+
+        mcluster = test_mock_cluster_new(1, &bootstraps);
+        TEST_CALL_ERR__(rd_kafka_mock_topic_create(mcluster, topic, 1, 1));
+        TEST_CALL_ERR__(
+            rd_kafka_mock_coordinator_set(mcluster, "group", group_id, 1));
+        TEST_CALL_ERR__(
+            rd_kafka_mock_coordinator_set(mcluster, "group", warmup_id, 1));
+
+        test_conf_init(&conf, NULL, 30);
+        test_conf_set(conf, "bootstrap.servers", bootstraps);
+        rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
+        q  = rd_kafka_queue_new(rk);
+
+        options = rd_kafka_AdminOptions_new(
+            rk, RD_KAFKA_ADMIN_OP_LISTCONSUMERGROUPOFFSETS);
+        TEST_CALL_ERR__(rd_kafka_AdminOptions_set_request_timeout(
+            options, req_timeout_ms, errstr, sizeof(errstr)));
+
+        to_list = rd_kafka_topic_partition_list_new(1);
+        rd_kafka_topic_partition_list_add(to_list, topic, 0);
+        request = rd_kafka_ListConsumerGroupOffsets_new(group_id, to_list);
+        warmup  = rd_kafka_ListConsumerGroupOffsets_new(warmup_id, to_list);
+        rd_kafka_topic_partition_list_destroy(to_list);
+
+        /* Get past the bootstrap connection first: a FindCoordinator sent on
+         * it is retried on the learned broker when the bootstrap broker is
+         * decommissioned, which would consume the delay below. */
+        TEST_SAY("ListConsumerGroupOffsets for %s\n", warmup_id);
+        err = list_consumer_group_offsets_err(rk, warmup, options, q,
+                                              tmout_multip(10000));
+        TEST_ASSERT(!err, "Expected the warm-up request to succeed, got %s",
+                    rd_kafka_err2name(err));
+
+        TEST_CALL_ERR__(rd_kafka_mock_broker_push_request_error_rtts(
+            mcluster, 1, RD_KAFKAP_FindCoordinator, 1,
+            RD_KAFKA_RESP_ERR_NO_ERROR, coord_rtt_ms));
+
+        TEST_SAY("ListConsumerGroupOffsets with FindCoordinator delayed %dms\n",
+                 coord_rtt_ms);
+        err = list_consumer_group_offsets_err(rk, request, options, q,
+                                              tmout_multip(coord_rtt_ms));
+        TEST_ASSERT(err == RD_KAFKA_RESP_ERR__TIMED_OUT,
+                    "Expected the request to time out before the delayed "
+                    "FindCoordinator response, got %s",
+                    rd_kafka_err2name(err));
+
+        TEST_SAY("Waiting for the late FindCoordinator response\n");
+        rd_sleep(coord_rtt_ms / 1000 + 1);
+
+        TEST_SAY("ListConsumerGroupOffsets after the late response\n");
+        err = list_consumer_group_offsets_err(rk, request, options, q,
+                                              tmout_multip(10000));
+        TEST_ASSERT(!err, "Expected the coordinator to answer, got %s",
+                    rd_kafka_err2name(err));
+
+        rd_kafka_ListConsumerGroupOffsets_destroy(request);
+        rd_kafka_ListConsumerGroupOffsets_destroy(warmup);
+        rd_kafka_AdminOptions_destroy(options);
+        rd_kafka_queue_destroy(q);
+        rd_kafka_destroy(rk);
+        test_mock_cluster_destroy(mcluster);
+        SUB_TEST_PASS();
+}
+
 int main_0138_admin_mock(int argc, char **argv) {
 
         TEST_SKIP_MOCK_CLUSTER(0);
@@ -393,6 +517,8 @@ int main_0138_admin_mock(int argc, char **argv) {
         do_test_ListConsumerGroupOffsets_errors(RD_KAFKA_PRODUCER, rd_false);
         do_test_ListConsumerGroupOffsets_errors(RD_KAFKA_CONSUMER, rd_false);
         do_test_ListConsumerGroupOffsets_errors(RD_KAFKA_CONSUMER, rd_true);
+
+        do_test_ListConsumerGroupOffsets_late_FindCoordinator();
 
         return 0;
 }
