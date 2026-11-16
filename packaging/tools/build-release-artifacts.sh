@@ -62,7 +62,8 @@ fi
 
 if [ -n "$docker_image" ]; then
     # Running on the host, spin up the docker builder.
-    exec docker run $docker_platform -v "$PWD:/v" $docker_image /v/packaging/tools/build-release-artifacts.sh $disable_gssapi --in-docker "/v/$output"
+    exec docker run --rm $docker_platform \
+        -v "$PWD:/v" $docker_image /v/packaging/tools/build-release-artifacts.sh $disable_gssapi --in-docker "/v/$output"
     # Only reached on exec error
     exit $?
 fi
@@ -83,7 +84,8 @@ if grep -q alpine /etc/os-release 2>/dev/null ; then
 
 else
     # CentOS
-    yum install -y libstdc++-devel gcc gcc-c++ python3 git perl-IPC-Cmd perl-Pod-Html perl-bignum $extra_pkgs_rpm
+    yum install -y libstdc++-devel gcc gcc-c++ python3 git perl-IPC-Cmd \
+        perl-Pod-Html perl-bignum perl-Time-Piece $extra_pkgs_rpm
 fi
 
 
