@@ -150,6 +150,11 @@ rd_kafka_metadata_refresh_topics(rd_kafka_t *rk,
                                  int32_t cgrp_subscription_version,
                                  const char *reason);
 rd_kafka_resp_err_t
+rd_kafka_metadata_refresh_topic_ids(rd_kafka_t *rk,
+                                    rd_kafka_broker_t *rkb,
+                                    const rd_list_t *topic_ids,
+                                    const char *reason);
+rd_kafka_resp_err_t
 rd_kafka_metadata_refresh_known_topics(rd_kafka_t *rk,
                                        rd_kafka_broker_t *rkb,
                                        rd_bool_t force,
@@ -268,6 +273,9 @@ struct rd_kafka_metadata_cache {
                                           * leaders. */
         cnd_t rkmc_cnd;                  /* cache_wait_change() cond. */
         mtx_t rkmc_cnd_lock;             /* lock for rkmc_cnd */
+        int rkmc_waiters;                /* Calls that may wait on rkmc_cnd,
+                                          * destroy waits for them to return.
+                                          * Protected by rkmc_cnd_lock */
 };
 
 
@@ -328,6 +336,9 @@ void rd_kafka_metadata_fast_leader_query(rd_kafka_t *rk, rd_bool_t force);
 void rd_kafka_metadata_cache_init(rd_kafka_t *rk);
 void rd_kafka_metadata_cache_destroy(rd_kafka_t *rk);
 void rd_kafka_metadata_cache_purge(rd_kafka_t *rk, rd_bool_t purge_observers);
+void rd_kafka_metadata_cache_wait_begin(rd_kafka_t *rk);
+void rd_kafka_metadata_cache_wait_end(rd_kafka_t *rk);
+void rd_kafka_metadata_cache_wait_terminate(rd_kafka_t *rk);
 int rd_kafka_metadata_cache_wait_change(rd_kafka_t *rk, int timeout_ms);
 void rd_kafka_metadata_cache_dump(FILE *fp, rd_kafka_t *rk);
 
